@@ -1,0 +1,24 @@
+{
+  "name": "buffer-worker-template",
+  "version": "1.0.0",
+  "description": "Reusable Notion + Buffer content-operations worker. Deploy per client; the setupClient tool provisions the Publishing database from their Buffer channels.",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "check": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=22.0.0",
+    "npm": ">=10.9.2"
+  },
+  "dependencies": {
+    "@notionhq/client": "^5.23.2",
+    "@notionhq/workers": "^0.8.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "tsx": "^4.21.0",
+    "typescript": "^5.4.0"
+  }
+}
