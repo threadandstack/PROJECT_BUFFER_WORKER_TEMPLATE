@@ -829,6 +829,7 @@ worker.tool("setupClient", {
 		const properties: Record<string, unknown> = {
 			[PUB.content]: { title: {} },
 			[PUB.copy]: { rich_text: {} },
+			[PUB.firstComment]: { rich_text: {} },
 			[PUB.channels]: { multi_select: { options: channelOptions } },
 			[PUB.publishAt]: { date: {} },
 			[PUB.media]: { files: {} },
@@ -1359,13 +1360,29 @@ interface CreatedPost {
  * (`[{ image: { url } }]`) — the older `{ images: [...] }` form IRIS used is no
  * longer accepted by the schema.
  */
+/**
+ * Networks whose Buffer post metadata accepts a bare `firstComment` (no other
+ * required fields). LinkedIn is the common case. Facebook and Instagram also
+ * support first comments but require extra metadata, so they're left out until a
+ * client actually needs them.
+ */
+const FIRST_COMMENT_SERVICES = new Set(["linkedin"]);
+
 async function createBufferPost(
 	channelId: string,
+	service: string,
 	text: string,
 	assets: Array<Record<string, unknown>>,
 	mode: string,
 	dueAt: string | null,
+	firstComment: string,
 ): Promise<CreatedPost> {
+	// A first comment is attached only on networks that support it; elsewhere it
+	// is silently ignored, which is correct — it's a LinkedIn/Instagram concept.
+	const metadata =
+		firstComment && FIRST_COMMENT_SERVICES.has(service)
+			? { [service]: { firstComment } }
+			: undefined;
 	const data = await bufferGraphQL<{
 		createPost: { post?: CreatedPost; message?: string };
 	}>(
@@ -1389,6 +1406,7 @@ async function createBufferPost(
 				// Only customScheduled carries a time; the others are positional.
 				...(mode === "customScheduled" && dueAt ? { dueAt } : {}),
 				assets,
+				...(metadata ? { metadata } : {}),
 			},
 		},
 	);
@@ -1508,6 +1526,7 @@ const PUBLISH_TRIGGERS: Record<string, string> = {
 const PUB = {
 	content: "Content",
 	copy: "Post's Copy",
+	firstComment: "First Comment",
 	channels: "Channels",
 	publishAt: "Publish At",
 	media: "Post's Media",
@@ -1549,20 +1568,22 @@ function notionWritesReady(syncName: string): boolean {
  * silently overwrite the earlier, delivering a post to the wrong network. A
  * residual collision is treated as fatal rather than guessed at.
  */
-async function channelIdsByLabel(): Promise<Map<string, string>> {
+type ChannelRef = { id: string; service: string };
+
+async function channelsByLabel(): Promise<Map<string, ChannelRef>> {
 	const channels = await fetchChannels();
-	const map = new Map<string, string>();
+	const map = new Map<string, ChannelRef>();
 
 	for (const channel of channels) {
 		const label = channelLabel(channel);
 		const existing = map.get(label);
-		if (existing && existing !== channel.id) {
+		if (existing && existing.id !== channel.id) {
 			throw new Error(
-				`Two Buffer channels share the label "${label}" (${existing} and ${channel.id}). ` +
+				`Two Buffer channels share the label "${label}" (${existing.id} and ${channel.id}). ` +
 					"Rename one in Buffer — publishing is blocked rather than risk posting to the wrong channel.",
 			);
 		}
-		map.set(label, channel.id);
+		map.set(label, { id: channel.id, service: channel.service });
 	}
 
 	return map;
@@ -1593,7 +1614,7 @@ interface PublishOutcome {
 async function publishRow(
 	notion: Client,
 	page: { id: string; properties: NotionProps },
-	channelIds: Map<string, string>,
+	channelIds: Map<string, ChannelRef>,
 	remaining: number,
 	queue: { scheduled: number; limit: number },
 ): Promise<PublishOutcome> {
@@ -1621,6 +1642,7 @@ async function publishRow(
 	const channels = propMultiSelect(page.properties, PUB.channels);
 	const text = await readPostText(notion, page.id, propText(page.properties, PUB.copy));
 	const dueAt = propDate(page.properties, PUB.publishAt);
+	const firstComment = propText(page.properties, PUB.firstComment).trim();
 
 	let mode = PUBLISH_TRIGGERS[status];
 	if (!mode) {
@@ -1678,13 +1700,13 @@ async function publishRow(
 	const failures: string[] = [...media.warnings];
 
 	for (const channel of channels) {
-		const channelId = channelIds.get(channel);
-		if (!channelId) {
+		const ref = channelIds.get(channel);
+		if (!ref) {
 			failures.push(`${channel}: not connected to Buffer`);
 			continue;
 		}
 		try {
-			const post = await createBufferPost(channelId, text, media.assets, mode, dueAt);
+			const post = await createBufferPost(ref.id, ref.service, text, media.assets, mode, dueAt, firstComment);
 			postIds.push(`${channel}=${post.id}`);
 		} catch (err) {
 			failures.push(`${channel}: ${(err as Error).message}`);
@@ -1735,7 +1757,7 @@ async function publishAllReady(notion: Client, caller: string): Promise<string[]
 	});
 	if (!ready.results.length) return [];
 
-	const channelIds = await channelIdsByLabel();
+	const channelIds = await channelsByLabel();
 	const { scheduled, limit } = await queueDepth();
 	let remaining = limit > 0 ? limit - scheduled : Number.MAX_SAFE_INTEGER;
 
@@ -1758,7 +1780,7 @@ async function publishPageById(notion: Client, pageId: string, caller: string): 
 		id: string;
 		properties: NotionProps;
 	};
-	const channelIds = await channelIdsByLabel();
+	const channelIds = await channelsByLabel();
 	const queue = await queueDepth();
 	const remaining = queue.limit > 0 ? queue.limit - queue.scheduled : Number.MAX_SAFE_INTEGER;
 
@@ -2091,7 +2113,7 @@ worker.tool("publishNow", {
 		}
 
 		const page = matches.results[0] as { id: string; properties: NotionProps };
-		const channelIds = await channelIdsByLabel();
+		const channelIds = await channelsByLabel();
 		const queue = await queueDepth();
 		const remaining = queue.limit > 0 ? queue.limit - queue.scheduled : Number.MAX_SAFE_INTEGER;
 
